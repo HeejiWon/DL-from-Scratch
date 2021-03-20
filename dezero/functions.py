@@ -4,6 +4,10 @@ from dezero.core import Function, as_variable, Variable, as_array
 from dezero import cuda, utils
 
 
+# =============================================================================
+# Basic functions: sin / cos / tanh / exp / log
+# =============================================================================
+
 class Sin(Function):
     def forward(self, x):
         y = np.sin(x)
@@ -44,8 +48,41 @@ class Tanh(Function):
 def tanh(x):
     return Tanh()(x)
 
+
+class Exp(Function):
+    def forward(self, x):
+        xp = cuda.get_array_module(x)
+        y = xp.exp(x)
+        return y
+
+    def backward(self, gy):
+        y = self.outputs[0]()  # weakref
+        gx = gy * y
+        return gx
+
+
+def exp(x):
+    return Exp()(x)
+
+
+class Log(Function):
+    def forward(self, x):
+        xp = cuda.get_array_module(x)
+        y = xp.log(x)
+        return y
+
+    def backward(self, gy):
+        x, = self.inputs
+        gx = gy / x
+        return gx
+
+
+def log(x):
+    return Log()(x)
+
+
 #---------------------------------------------------------------------------------------
-# Tensor Operations : reshape, transpose
+# Tensor Operations : reshape, transpose, get_item
 #---------------------------------------------------------------------------------------
 
 class Reshape(Function):
@@ -86,6 +123,45 @@ class Transpose(Function):
 
 def transpose(x, axes=None):
     return Transpose(axes)(x)
+
+
+class GetItem(Function):
+    def __init__(self, slices):
+        self.slices = slices
+
+    def forward(self, x):
+        y = x[self.slices]
+        return y
+
+    def backward(self, gy):
+        x, = self.inputs
+        f = GetItemGrad(self.slices, x.shape)
+        return f(gy)
+
+
+class GetItemGrad(Function):
+    def __init__(self, slices, in_shape):
+        self.slices = slices
+        self.in_shape = in_shape
+
+    def forward(self, gy):
+        xp = dezero.cuda.get_array_module(gy)
+        gx = xp.zeros(self.in_shape, dtype=gy.dtype)
+
+        if xp is np:
+            np.add.at(gx, self.slices, gy)
+        else:
+            xp.scatter_add(gx, self.slices, gy)
+        return gx
+
+    def backward(self, ggx):
+        return get_item(ggx, self.slices)
+
+
+def get_item(x, slices):
+    f = GetItem(slices)
+    return f(x)
+
 
 
 #--------------------------------------------------------------------------------------
@@ -199,7 +275,7 @@ def linear_simple(x, W, b=None):
 
 
 #--------------------------------------------------------------------------------------
-# Activation (Sigmoid, )
+# Activation: Sigmoid, Softmax
 #--------------------------------------------------------------------------------------
 
 
@@ -219,6 +295,47 @@ class Sigmoid(Function):
 def sigmoid(x):
     return Sigmoid()(x)
 
+
+def softmax_simple(x, axis=1):
+    x = as_variable(x)
+    y = exp(x)
+    sum_y = sum(y, axis=axis, keepdims=True)
+    return y / sum_y
+
+
+def softmax_cross_entropy_simple(x, t):
+    x, t = as_variable(x), as_variable(t)
+    N = x.shape[0]
+    
+    p = softmax(x)  # 또는 softmax_simple(x)
+    p = clip(p, 1e-15, 1.0)  # log(0)을 방지하기 위해 p의 값을 1e-15 이상으로 함
+    log_p = log(p)  # log는 DeZero 함수
+    tlog_p = log_p[np.arange(N), t.data]
+    y = -1 * sum(tlog_p) / N
+    return y
+
+
+class Softmax(Function):
+    def __init__(self, axis=1):
+        self.axis = axis
+
+    def forward(self, x):
+        xp = cuda.get_array_module(x)
+        y = x - x.max(axis=self.axis, keepdims=True)
+        y = xp.exp(y)
+        y /= y.sum(axis=self.axis, keepdims=True)
+        return y
+
+    def backward(self, gy):
+        y = self.outputs[0]()
+        gx = y * gy
+        sumdx = gx.sum(axis=self.axis, keepdims=True)
+        gx -= y * sumdx
+        return gx
+
+
+def softmax(x, axis=1):
+    return Softmax(axis)(x)
 
 
 #--------------------------------------------------------------------------------------
@@ -245,3 +362,45 @@ class MeanSquaredError(Function):
 
 def mean_squared_error(x0, x1):
     return MeanSquaredError()(x0, x1)
+
+
+class Clip(Function):
+    def __init__(self, x_min, x_max):
+        self.x_min = x_min
+        self.x_max = x_max
+
+    def forward(self, x):
+        xp = cuda.get_array_module(x)
+        y = xp.clip(x, self.x_min, self.x_max)
+        return y
+
+    def backward(self, gy):
+        x, = self.inputs
+        mask = (x.data >= self.x_min) * (x.data <= self.x_max)
+        gx = gy * mask
+        return gx
+
+    
+# =============================================================================
+# max / min / clip
+# =============================================================================
+
+class Clip(Function):
+    def __init__(self, x_min, x_max):
+        self.x_min = x_min
+        self.x_max = x_max
+
+    def forward(self, x):
+        xp = cuda.get_array_module(x)
+        y = xp.clip(x, self.x_min, self.x_max)
+        return y
+
+    def backward(self, gy):
+        x, = self.inputs
+        mask = (x.data >= self.x_min) * (x.data <= self.x_max)
+        gx = gy * mask
+        return gx
+
+
+def clip(x, x_min, x_max):
+    return Clip(x_min, x_max)(x)
