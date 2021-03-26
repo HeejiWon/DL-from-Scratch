@@ -26,9 +26,12 @@ else:
     from dezero.layers import Layer
     from dezero.models import Model
     
+    
+    import dezero.datasets
     import dezero.utils
     import dezero.functions
     import dezero.layers
+    
 
 setup_variable()
 __version__ = '0.0.13'
